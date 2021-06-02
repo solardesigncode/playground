@@ -23,7 +23,7 @@ a {
 .twitterbox {
   display: grid;
   grid-column-gap: 24px;
-  grid-template-columns: repeat(3, minmax(300px, 320px));
+  grid-template-columns: repeat(3, auto);
   align-items: start;
 }
 
@@ -34,12 +34,18 @@ margin-right: auto;
 }
 
 .grid-item {
-  max-width: 300px;
+max-width: 25%
 }
-@media screen and (min-width: 1000px) {
+
+@media screen and (max-width: 1024px) {
   .grid-item {
-    width: 25%;
-  }
+    max-width: 50%;
+   }
+}
+@media screen and (max-width: 600px) {
+  .grid-item {
+    max-width: 100%;
+   }
 }
 .grid-item__inner {
   margin: 5px;
@@ -78,7 +84,6 @@ margin-right: auto;
 
 .twitter_logo {
   grid-column: 3;
-  justify-items: end;
   height: 24px;
 }
 
