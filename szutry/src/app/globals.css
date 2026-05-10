@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #37352f;
+  --muted: #787774;
+  --subtle: rgba(55, 53, 47, 0.65);
+  --faint: rgba(55, 53, 47, 0.45);
+  --hover: rgba(55, 53, 47, 0.06);
+  --active: rgba(55, 53, 47, 0.12);
+  --border: rgba(55, 53, 47, 0.1);
+  --border-strong: rgba(55, 53, 47, 0.16);
+  --sidebar: #f7f7f5;
+  --accent: #2383e2;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-faint: var(--faint);
+  --color-hover: var(--hover);
+  --color-active: var(--active);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-sidebar: var(--sidebar);
+  --color-accent: var(--accent);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
+    sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Leaflet popup — re-style to fit Notion vibe */
+.leaflet-popup-content-wrapper {
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(15, 15, 15, 0.08), 0 0 0 1px rgba(15, 15, 15, 0.04);
+  padding: 2px;
+}
+.leaflet-popup-content {
+  margin: 10px 12px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--foreground);
+}
+.leaflet-popup-content strong {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.leaflet-popup-tip {
+  box-shadow: 0 2px 6px rgba(15, 15, 15, 0.06);
+}
+.leaflet-container {
+  font-family: var(--font-sans);
+  background: #f7f7f5;
+}
+.leaflet-control-attribution {
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.85) !important;
+}
