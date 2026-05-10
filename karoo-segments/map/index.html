@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Moje segmenty — szuter & asfalt</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    html, body, #map { height: 100%; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .legend {
+      background: rgba(255, 255, 255, 0.95);
+      padding: 10px 12px;
+      border-radius: 6px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .legend .swatch {
+      display: inline-block;
+      width: 18px;
+      height: 4px;
+      margin-right: 6px;
+      vertical-align: middle;
+      border-radius: 2px;
+    }
+    .empty {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      background: white;
+      padding: 16px 22px;
+      border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+      z-index: 1000;
+      font-size: 14px;
+      max-width: 420px;
+      text-align: center;
+    }
+    code { background: #f3f3f3; padding: 1px 5px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script>
+    const STYLES = {
+      gravel_premium:  { color: "#c2410c", label: "Szuter premium" },
+      asphalt_s_tier:  { color: "#1d4ed8", label: "Asfalt S-tier" },
+    };
+    const DEFAULT_STYLE = { color: "#555", label: "Inne" };
+
+    const map = L.map("map").setView([52.0, 19.0], 6);
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    }).addTo(map);
+
+    function styleFor(feature) {
+      const s = STYLES[feature.properties.kind] || DEFAULT_STYLE;
+      return { color: s.color, weight: 5, opacity: 0.85 };
+    }
+
+    function popupFor(feature) {
+      const p = feature.properties || {};
+      const km = ((p.distance_m || 0) / 1000).toFixed(2);
+      const min = ((p.duration_s || 0) / 60).toFixed(1);
+      const gain = Math.round(p.elev_gain_m || 0);
+      const date = (p.recorded_at || "").slice(0, 10);
+      const kindLabel = (STYLES[p.kind] || DEFAULT_STYLE).label;
+      return `
+        <strong>${p.name || "(bez nazwy)"}</strong><br>
+        ${kindLabel}<br>
+        ${km} km &middot; ${min} min &middot; +${gain} m<br>
+        <small>${date}</small>
+      `;
+    }
+
+    fetch("segments.geojson", { cache: "no-store" })
+      .then((r) => {
+        if (!r.ok) throw new Error("brak segments.geojson");
+        return r.json();
+      })
+      .then((data) => {
+        const feats = data.features || [];
+        if (feats.length === 0) {
+          const el = document.createElement("div");
+          el.className = "empty";
+          el.innerHTML =
+            "Brak segmentów. Uruchom <code>python slice.py ride.fit</code> i wybierz fragmenty.";
+          document.body.appendChild(el);
+          return;
+        }
+        const layer = L.geoJSON(data, {
+          style: styleFor,
+          onEachFeature: (feature, l) => l.bindPopup(popupFor(feature)),
+        }).addTo(map);
+        map.fitBounds(layer.getBounds(), { padding: [30, 30] });
+      })
+      .catch(() => {
+        const el = document.createElement("div");
+        el.className = "empty";
+        el.innerHTML =
+          "Nie znaleziono <code>segments.geojson</code>. Wygeneruj go skryptem <code>slice.py</code>.";
+        document.body.appendChild(el);
+      });
+
+    const legend = L.control({ position: "bottomright" });
+    legend.onAdd = function () {
+      const div = L.DomUtil.create("div", "legend");
+      div.innerHTML = Object.values(STYLES)
+        .map((s) => `<span class="swatch" style="background:${s.color}"></span>${s.label}`)
+        .join("<br>");
+      return div;
+    };
+    legend.addTo(map);
+  </script>
+</body>
+</html>
