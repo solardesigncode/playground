@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
-Tnie plik .fit z Karoo na fragmenty między kolejnymi naciśnięciami Lap.
-Interaktywnie pytasz które fragmenty zapisać i z jaką kategorią,
-a wybrane dopisuje do segments.geojson w formacie LineString.
+Tnie plik .fit z Karoo na fragmenty na podstawie naciśnięć Lap.
+Konwencja: na końcu fajnego odcinka klikasz przycisk Lap N razy:
+    1 klik  -> C-tier
+    2 kliki -> B-tier
+    3 kliki -> A-tier
+Kliknięcia w odstępie krótszym niż --burst-gap sekund są traktowane
+jako jeden "burst" — czyli granica segmentu plus ocena tieru.
+
+Segment to fragment trasy od poprzedniego burstu (albo od początku
+nagrania) do bieżącego burstu.
 
 Użycie:
     python slice.py ride.fit
-    python slice.py ride.fit --out ../map/segments.geojson
+    python slice.py ride.fit --burst-gap 5 --out ../map/segments.geojson
 """
 from __future__ import annotations
 
@@ -27,8 +34,8 @@ except ImportError:
 SEMICIRCLE_TO_DEG = 180.0 / 2**31
 
 KIND_CHOICES = {
-    "s": ("gravel_premium", "szuter premium"),
-    "a": ("asphalt_s_tier", "asfalt S-tier"),
+    "s": ("gravel", "szuter"),
+    "a": ("asphalt", "asfalt"),
 }
 
 
@@ -38,6 +45,16 @@ class TrackPoint:
     lat: float
     lon: float
     alt: float | None
+
+
+@dataclass
+class Burst:
+    time: dt.datetime
+    clicks: int
+
+    @property
+    def tier(self) -> str:
+        return {1: "c", 2: "b"}.get(self.clicks, "a")
 
 
 def parse_fit(path: Path) -> tuple[list[TrackPoint], list[dt.datetime]]:
@@ -53,38 +70,55 @@ def parse_fit(path: Path) -> tuple[list[TrackPoint], list[dt.datetime]]:
         lon = lon_raw * SEMICIRCLE_TO_DEG if isinstance(lon_raw, int) else lon_raw
         points.append(TrackPoint(time=ts, lat=lat, lon=lon, alt=d.get("altitude")))
 
-    lap_boundaries: list[dt.datetime] = []
+    lap_times: list[dt.datetime] = []
     for lap in fit.get_messages("lap"):
         d = {f.name: f.value for f in lap.fields}
-        ts = d.get("start_time")
+        ts = d.get("start_time") or d.get("timestamp")
         if ts is not None:
-            lap_boundaries.append(ts)
+            lap_times.append(ts)
 
     if not points:
         sys.exit("Plik FIT nie zawiera punktów GPS.")
 
-    return points, sorted(set(lap_boundaries))
+    return points, sorted(set(lap_times))
+
+
+def cluster_bursts(lap_times: list[dt.datetime], gap_seconds: float) -> list[Burst]:
+    bursts: list[Burst] = []
+    for t in lap_times:
+        if bursts and (t - bursts[-1].time).total_seconds() <= gap_seconds:
+            bursts[-1] = Burst(time=bursts[-1].time, clicks=bursts[-1].clicks + 1)
+        else:
+            bursts.append(Burst(time=t, clicks=1))
+    return bursts
 
 
 def slice_into_segments(
-    points: list[TrackPoint], boundaries: list[dt.datetime]
-) -> list[list[TrackPoint]]:
-    if not boundaries:
-        return [points]
+    points: list[TrackPoint], bursts: list[Burst]
+) -> list[tuple[list[TrackPoint], Burst | None]]:
+    """Zwraca listę (punkty_segmentu, burst_konczacy). Pierwszy segment kończy
+    pierwszy burst, ostatni może mieć burst=None jeśli trasa kończy się bez kliku."""
+    segments: list[tuple[list[TrackPoint], Burst | None]] = []
+    if not bursts:
+        return [(points, None)] if len(points) >= 2 else []
 
-    cuts = sorted(set([points[0].time, *boundaries, points[-1].time]))
-    segments: list[list[TrackPoint]] = []
-    idx = 0
-    for start, end in zip(cuts, cuts[1:]):
+    cursor = 0
+    seg_start_time = points[0].time
+    for burst in bursts:
         seg: list[TrackPoint] = []
-        while idx < len(points) and points[idx].time < start:
-            idx += 1
-        j = idx
-        while j < len(points) and points[j].time <= end:
-            seg.append(points[j])
-            j += 1
+        while cursor < len(points) and points[cursor].time <= burst.time:
+            if points[cursor].time >= seg_start_time:
+                seg.append(points[cursor])
+            cursor += 1
         if len(seg) >= 2:
-            segments.append(seg)
+            segments.append((seg, burst))
+        seg_start_time = burst.time
+
+    # ogonek po ostatnim burście (bez tieru)
+    tail = [p for p in points[cursor:] if p.time >= seg_start_time]
+    if len(tail) >= 2:
+        segments.append((tail, None))
+
     return segments
 
 
@@ -125,12 +159,15 @@ def load_geojson(path: Path) -> dict:
     return {"type": "FeatureCollection", "features": []}
 
 
-def feature_for(seg: list[TrackPoint], stats: dict, kind: str, name: str) -> dict:
+def feature_for(
+    seg: list[TrackPoint], stats: dict, kind: str, tier: str, name: str
+) -> dict:
     return {
         "type": "Feature",
         "properties": {
             "name": name,
             "kind": kind,
+            "tier": tier,
             "distance_m": stats["distance_m"],
             "duration_s": stats["duration_s"],
             "elev_gain_m": stats["elev_gain_m"],
@@ -138,7 +175,9 @@ def feature_for(seg: list[TrackPoint], stats: dict, kind: str, name: str) -> dic
         },
         "geometry": {
             "type": "LineString",
-            "coordinates": [[p.lon, p.lat] + ([p.alt] if p.alt is not None else []) for p in seg],
+            "coordinates": [
+                [p.lon, p.lat] + ([p.alt] if p.alt is not None else []) for p in seg
+            ],
         },
     }
 
@@ -147,30 +186,48 @@ def fmt_time(t: dt.datetime) -> str:
     return t.strftime("%H:%M:%S")
 
 
-def interactive_pick(segments: list[list[TrackPoint]], out_path: Path) -> None:
+def interactive_pick(
+    segments: list[tuple[list[TrackPoint], Burst | None]], out_path: Path
+) -> None:
     geo = load_geojson(out_path)
-    print(f"\nZnaleziono {len(segments)} fragmentów (między Lapami).\n")
+    print(f"\nZnaleziono {len(segments)} fragmentów.\n")
 
     added = 0
-    for i, seg in enumerate(segments, 1):
+    for i, (seg, burst) in enumerate(segments, 1):
         stats = segment_stats(seg)
         km = stats["distance_m"] / 1000
         mins = stats["duration_s"] / 60
+        if burst is None:
+            tier_label = "—  (brak kliku na końcu)"
+            default_tier = None
+        else:
+            tier_label = f"{burst.tier.upper()}-tier  ({burst.clicks}× lap)"
+            default_tier = burst.tier
         print(
             f"[{i}/{len(segments)}] {fmt_time(seg[0].time)}–{fmt_time(seg[-1].time)}  "
-            f"{km:.2f} km  {mins:.1f} min  +{stats['elev_gain_m']:.0f} m"
+            f"{km:.2f} km  {mins:.1f} min  +{stats['elev_gain_m']:.0f} m  →  {tier_label}"
         )
-        choice = input("  [s] szuter / [a] asfalt / [p] pomiń / [q] zakończ: ").strip().lower()
+        if default_tier is None:
+            choice = input("  brak tieru — [s] szuter / [a] asfalt / [p] pomiń / [q] zakończ: ").strip().lower()
+        else:
+            choice = input("  [s] szuter / [a] asfalt / [p] pomiń / [q] zakończ: ").strip().lower()
         if choice == "q":
             break
         if choice not in KIND_CHOICES:
             continue
-        kind, label = KIND_CHOICES[choice]
-        default_name = f"{label} {seg[0].time:%Y-%m-%d}"
+        kind, kind_label = KIND_CHOICES[choice]
+        tier = default_tier
+        if tier is None:
+            t_in = input("  tier [a/b/c]: ").strip().lower()
+            if t_in not in ("a", "b", "c"):
+                print("  pomijam (zły tier)\n")
+                continue
+            tier = t_in
+        default_name = f"{kind_label} {tier.upper()} {seg[0].time:%Y-%m-%d}"
         name = input(f"  nazwa [{default_name}]: ").strip() or default_name
-        geo["features"].append(feature_for(seg, stats, kind, name))
+        geo["features"].append(feature_for(seg, stats, kind, tier, name))
         added += 1
-        print(f"  + zapisano jako {kind}\n")
+        print(f"  + zapisano: {kind} / {tier.upper()}-tier\n")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(geo, indent=2, ensure_ascii=False))
@@ -179,7 +236,7 @@ def interactive_pick(segments: list[list[TrackPoint]], out_path: Path) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Karoo Lap → segments.geojson")
+    ap = argparse.ArgumentParser(description="Karoo Lap-burst → segments.geojson")
     ap.add_argument("fit", type=Path, help="ścieżka do .fit z Karoo")
     ap.add_argument(
         "--out",
@@ -187,14 +244,23 @@ def main() -> None:
         default=Path(__file__).parent / "map" / "segments.geojson",
         help="docelowy plik geojson (domyślnie map/segments.geojson)",
     )
+    ap.add_argument(
+        "--burst-gap",
+        type=float,
+        default=5.0,
+        help="maks. odstęp w sekundach między klikami w jednym burście (domyślnie 5)",
+    )
     args = ap.parse_args()
 
     if not args.fit.exists():
         sys.exit(f"Nie znaleziono pliku: {args.fit}")
 
-    points, boundaries = parse_fit(args.fit)
-    print(f"Punktów GPS: {len(points)}, lapów: {len(boundaries)}")
-    segments = slice_into_segments(points, boundaries)
+    points, lap_times = parse_fit(args.fit)
+    bursts = cluster_bursts(lap_times, args.burst_gap)
+    print(f"Punktów GPS: {len(points)}, lapów: {len(lap_times)}, burstów: {len(bursts)}")
+    for b in bursts:
+        print(f"  {fmt_time(b.time)}  {b.clicks}× → {b.tier.upper()}-tier")
+    segments = slice_into_segments(points, bursts)
     interactive_pick(segments, args.out)
 
 
