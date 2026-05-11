@@ -2,6 +2,122 @@
 
 Witaj. Ten dokument to pełny briefing produktu i status prac. Zacznij od przeczytania go w całości, potem `AGENTS.md`, `DESIGN.md`, `README.md`.
 
+**Środowisko, w którym pracujesz:** VS Code + Claude plugin, lokalna maszyna ownera. Masz pełny dostęp do `gh` CLI, `git`, `vercel` CLI, npm, możesz pushować do dowolnego repo do którego owner ma uprawnienia, możesz tworzyć repo na GitHub. Poprzednia sesja była w restryktywnym sandboxie i dlatego pewne kroki zostały tobie.
+
+---
+
+## 0. Action items na start (zrób te kroki w kolejności)
+
+### 0.1 — Migracja kodu do dedykowanego repo `solardesigncode/szutry.cc`
+
+Repo **istnieje ale jest puste** (owner utworzył w poprzedniej sesji). Kod siedzi w `solardesigncode/playground` na branchu `claude/karoo-segment-export-tsTGK` w podkatalogu `szutry/`. Cel: wyciągnij `szutry/` jako root nowego repo z zachowaną historią.
+
+Z poziomu klona `playground` (jeśli nie masz — `gh repo clone solardesigncode/playground`):
+
+```bash
+cd ścieżka/do/playground
+git fetch origin
+git checkout claude/karoo-segment-export-tsTGK
+git pull --ff-only
+
+# Wyciągnij szutry/ jako osobną historię z plikami w roocie
+git subtree split --prefix=szutry -b szutry-only
+
+# Podłącz nowe repo i wypchnij na main
+git remote add szutry git@github.com:solardesigncode/szutry.cc.git
+git push -u szutry szutry-only:main
+
+# Sprzątanie
+git remote remove szutry
+git branch -D szutry-only
+```
+
+Sprawdź `gh repo view solardesigncode/szutry.cc` — powinno mieć `package.json`, `src/`, `DESIGN.md`, `HANDOFF.md`, `AGENTS.md` itd. **w roocie**.
+
+Następnie sklonuj nowe repo do nowej lokalnej ścieżki i pracuj już tam:
+
+```bash
+cd ~
+gh repo clone solardesigncode/szutry.cc
+cd szutry.cc
+npm install
+npm run dev   # sanity check, http://localhost:3000
+```
+
+Od tej pory wszystkie commity idą do `solardesigncode/szutry.cc`. Pracuj na branchach (nie pushuj bezpośrednio do `main` — otwieraj PR-y dla ownera).
+
+### 0.2 — Deploy na Vercel (Renton Media team)
+
+Owner ma plan Vercel Pro w teamie **Renton Media**. Dwie ścieżki:
+
+**Ścieżka A — UI (zalecane, owner klika):**
+1. Powiedz ownerowi żeby otworzył `https://vercel.com/new`
+2. Wybór team: **Renton Media**
+3. Import Git Repository: **`solardesigncode/szutry.cc`**
+4. Project Name: `szutry-cc`
+5. Application Preset: **Next.js** (ważne — Vercel sam wykryje, ale potwierdź)
+6. Root Directory: `./` (kod w roocie po migracji)
+7. Production Branch: `main`
+8. Environment Variables: **na razie żadne** (dodamy w 0.3 po Supabase)
+9. Deploy
+
+Po pierwszym deployu otrzymasz preview URL typu `szutry-cc.vercel.app`. Potwierdź że homepage renderuje mapę z 3 seed segmentami.
+
+**Ścieżka B — CLI (jeśli owner zaufał ci `vercel login`):**
+
+```bash
+cd ~/szutry.cc
+npx vercel login   # owner robi to raz interaktywnie
+npx vercel link --scope=renton-media   # albo bez --scope, wybierz w prompcie
+npx vercel --prod
+```
+
+**Domeny `szutry.cc` jeszcze nie podpinaj.** Zrobimy to dopiero po Fazie 2, gdy auth działa.
+
+### 0.3 — Założenie projektu Supabase (Faza 2 start)
+
+Owner musi sam utworzyć projekt (wymaga jego konta + ewentualnie karty dla większego planu):
+
+1. Powiedz ownerowi żeby założył projekt na `https://supabase.com/dashboard` — free tier wystarczy na start.
+2. Project name: `szutry-cc` (albo cokolwiek), region: **Frankfurt** (najbliżej Polski).
+3. Po utworzeniu, owner wkleja ci:
+   - `SUPABASE_URL` (Project Settings → API → Project URL)
+   - `SUPABASE_ANON_KEY` (Project Settings → API → anon public)
+   - `SUPABASE_SERVICE_ROLE_KEY` (Project Settings → API → service_role — **TYLKO server-side, nigdy nie ujawniaj klientowi**)
+4. Dodaj do `.env.local` lokalnie i do Environment Variables na Vercel (Production + Preview).
+5. Włącz PostGIS w SQL Editor: `CREATE EXTENSION IF NOT EXISTS postgis;`
+
+Następnie napisz pliki migracji SQL w `supabase/migrations/` (patrz sekcja 5 — Faza 2 — pełne schema). Użyj Supabase CLI lokalnie:
+
+```bash
+npm install -g supabase
+supabase login
+supabase link --project-ref <ref-z-dashboarda>
+supabase db push   # po napisaniu migracji
+```
+
+Owner musi po pierwszym pushu **ręcznie ustawić swoją rolę** w SQL Editor:
+
+```sql
+update profiles set role = 'admin' where id = (
+  select id from auth.users where email = 'mail.ownera@domena'
+);
+```
+
+### 0.4 — Wire auth (po 0.3)
+
+- Zainstaluj `@supabase/ssr` (nowy, nie `auth-helpers-nextjs` który jest **deprecated**).
+- Middleware `src/middleware.ts` do refreshu sesji.
+- Strona `/login` z formem: email + invite_code.
+- Server action `redeemInvite(email, code)` — waliduje kod (`invite_codes.uses < max_uses`, nie wygasły), tworzy `profile` z rolą `contributor`, wysyła magic link przez `auth.signInWithOtp`.
+- Trigger PostgreSQL po `auth.users` insert → tworzy `profiles` row (na wypadek logowania bez invite, którego nie powinno być, ale safety).
+- W `src/app/page.tsx` zastąp `listSegments()` callem do Supabase server-side (`createServerClient` z `@supabase/ssr`).
+- Header: jeśli zalogowany → pokaż email + Logout; jeśli nie → link do `/login`.
+
+### 0.5 — Co po Fazie 2
+
+Gdy auth + DB działają (owner zalogowany jako admin, segmenty czytane z bazy, viewer wciąż public dla anonimowych) — odpalcie razem **Fazę 3 (Authoring)**. Szczegóły w sekcji 5.
+
 ---
 
 ## 1. Produkt
